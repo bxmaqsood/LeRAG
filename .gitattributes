@@ -1,0 +1,11 @@
+# Normalize text files to LF in repo; convert to your OS on checkout
+* text=auto
+
+# Keep notebooks as-is (avoid noisy diffs)
+*.ipynb -text
+
+# Windows scripts
+*.ps1 text eol=crlf
+
+# Shell scripts
+*.sh text eol=lf
