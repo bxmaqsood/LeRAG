@@ -1,97 +1,112 @@
 import os
 import json
+from pathlib import Path
+from typing import Dict, Any, Iterator, Tuple, Union, List
+
 from sentence_transformers import SentenceTransformer
+
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, VectorParams, Distance
 
-# Paths and settings
-CHUNKS_PATH = "complaints_chunks.jsonl"  # your merged JSONL with one complaint per line
-DB_DIR = "qdrant_nhtsa_db"              # directory for Qdrant persistent storage
+
+# -----------------------------
+# Config (edit if needed)
+# -----------------------------
+INPUT_JSONL = "nhtsa_merged_complaints.jsonl"
+DB_DIR = "qdrant_nhtsa_db"
 COLLECTION_NAME = "nhtsa_complaints"
+
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 BATCH_SIZE = 256
+VECTOR_SIZE = 384  # MiniLM-L6-v2 output dimension
 
-def read_jsonl(path):
-    with open(path, "r", encoding="utf-8") as f:
+
+def read_jsonl(path: Path) -> Iterator[Dict[str, Any]]:
+    with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if line:
-                yield json.loads(line)
+            if not line:
+                continue
+            yield json.loads(line)
+
+
+def safe_point_id(raw_id: Any) -> Union[int, str]:
+    """
+    Qdrant supports int or str IDs.
+    Your NHTSA IDs look numeric (e.g. '11666886'), so we store as int when possible.
+    """
+    try:
+        return int(str(raw_id))
+    except Exception:
+        return str(raw_id)
+
 
 def main():
-    # Load embedding model
+    in_path = Path(INPUT_JSONL)
+    if not in_path.exists():
+        raise SystemExit(f"❌ Input JSONL not found: {in_path.resolve()}")
+
     print("Loading embedding model...")
     model = SentenceTransformer(EMBED_MODEL_NAME)
 
-    # Initialize Qdrant in embedded persistent mode
-    print("Starting Qdrant (embedded mode)...")
+    print("Opening Qdrant persistent client...")
     os.makedirs(DB_DIR, exist_ok=True)
-    client = QdrantClient(path=DB_DIR)  # Persists data to disk:contentReference[oaicite:1]{index=1}
+    client = QdrantClient(path=DB_DIR)
 
-    # Recreate collection (deletes if exists to start fresh)
+    print(f"Creating/recreating collection: {COLLECTION_NAME}")
+    # recreate_collection wipes old collection for clean rebuild
     client.recreate_collection(
         collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(size=384, distance=Distance.COSINE)
+        vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
     )
 
-    ids_batch = []
-    vectors_batch = []
-    payloads_batch = []
+    batch_ids: List[Union[int, str]] = []
+    batch_texts: List[str] = []
+    batch_payloads: List[Dict[str, Any]] = []
     total = 0
 
-    # Read each complaint from JSONL
-    for obj in read_jsonl(CHUNKS_PATH):
-        # Use complaint ID as the document ID (ensure it's an int for Qdrant)
-        doc_id = obj.get("id") or obj.get("chunk_id")
-        try:
-            doc_id = int(doc_id)
-        except ValueError:
-            # If not purely numeric, keep as string
-            doc_id = str(doc_id)
-
-        # Full text of the complaint (combine all parts, including narrative)
-        text = obj.get("full_text") or obj.get("text") 
-        if text is None:
-            continue  # skip if no text
-
-        # Prepare metadata payload (include all relevant fields)
+    for obj in read_jsonl(in_path):
+        doc_id = safe_point_id(obj.get("id"))
+        full_text = obj.get("full_text", "") or ""
         meta = obj.get("metadata", {}) or {}
-        # If not already separate, you can parse vehicle info into make/model.
-        # e.g., meta["make"] = meta.get("vehicle_raw", "").split()[0]  # "TESLA", etc.
-        meta["full_text"] = text  # store full text for retrieval context
-        meta["id"] = doc_id       # store the ID as well
 
-        ids_batch.append(doc_id)
-        payloads_batch.append(meta)
-        vectors_batch.append(text)  # will encode later
+        # Store metadata + full complaint text in payload
+        payload = dict(meta)
+        payload["id"] = str(obj.get("id"))
+        payload["full_text"] = full_text
+        payload["source"] = "nhtsa_complaints"
 
-        # Process in batches for efficiency
-        if len(ids_batch) >= BATCH_SIZE:
-            # Embed the batch of texts
-            embeddings = model.encode(vectors_batch, normalize_embeddings=True)
-            # Prepare point structures for Qdrant
+        batch_ids.append(doc_id)
+        batch_texts.append(full_text)
+        batch_payloads.append(payload)
+
+        if len(batch_ids) >= BATCH_SIZE:
+            embeddings = model.encode(batch_texts, normalize_embeddings=True).tolist()
             points = [
-                PointStruct(id=id_val, vector=emb.tolist(), payload=payload)
-                for id_val, emb, payload in zip(ids_batch, embeddings, payloads_batch)
+                PointStruct(id=pid, vector=vec, payload=pl)
+                for pid, vec, pl in zip(batch_ids, embeddings, batch_payloads)
             ]
-            # Upsert points into Qdrant
             client.upsert(collection_name=COLLECTION_NAME, points=points)
             total += len(points)
-            print(f"Indexed {total} complaints...")
-            # Reset batches
-            ids_batch, vectors_batch, payloads_batch = [], [], []
+            print(f"Upserted {total} complaints...")
 
-    # Flush any remaining
-    if ids_batch:
-        embeddings = model.encode(vectors_batch, normalize_embeddings=True)
+            batch_ids, batch_texts, batch_payloads = [], [], []
+
+    # final flush
+    if batch_ids:
+        embeddings = model.encode(batch_texts, normalize_embeddings=True).tolist()
         points = [
-            PointStruct(id=id_val, vector=emb.tolist(), payload=payload)
-            for id_val, emb, payload in zip(ids_batch, embeddings, payloads_batch)
+            PointStruct(id=pid, vector=vec, payload=pl)
+            for pid, vec, pl in zip(batch_ids, embeddings, batch_payloads)
         ]
         client.upsert(collection_name=COLLECTION_NAME, points=points)
         total += len(points)
 
-    print(f"✅ Completed indexing. Total complaints indexed: {total}")
+    print("\n✅ Done.")
+    print(f"Total complaints stored: {total}")
+    print(f"DB directory: {DB_DIR}")
+    print(f"Collection: {COLLECTION_NAME}")
+
 
 if __name__ == "__main__":
     main()
