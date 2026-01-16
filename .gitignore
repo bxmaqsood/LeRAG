@@ -1,0 +1,59 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+pip-wheel-metadata/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Virtual envs ---
+venv/
+.venv/
+env/
+ENV/
+*.venv/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Secrets ---
+.env
+*.key
+*.pem
+*.crt
+
+# --- Data / large artifacts (keep your repo light) ---
+*.sqlite3
+*.db
+*.duckdb
+*.parquet
+*.feather
+*.npy
+*.npz
+*.pkl
+
+# Your local vector DB folders (don’t commit these)
+chroma_db_storage and retrival/
+chroma_db_storage_and_retrival/
+chroma_db_storage_and_retrival/**
+chroma_db_storage_and_retrival/*
+chroma_nhtsa_db/
+qdrant_nhtsa_db/
+qdrant_db/
+
+# NHTSA data files (these can be huge; don’t commit unless you want)
+nhtsa_complaints_merged.json
+nhtsa_merged_complaints.jsonl
+
+# If you later create artifacts/ or models/
+artifacts/
+models/
